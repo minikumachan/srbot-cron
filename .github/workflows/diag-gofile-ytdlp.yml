@@ -1,0 +1,34 @@
+name: Diag — yt-dlp against GoFile
+
+on:
+  workflow_dispatch:
+    inputs:
+      gofile_url:
+        description: "GoFile URL (e.g. https://gofile.io/d/xxx)"
+        required: true
+        default: "https://gofile.io/d/cddaf778-9a54-49ae-8d2b-ff993ab169b5"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Who am I (IP of this runner — will be visible to GoFile)
+        run: |
+          curl -s https://api.ipify.org || echo "(ipify unreachable)"
+          echo ""
+
+      - name: Install yt-dlp
+        run: |
+          pip install --quiet yt-dlp
+          yt-dlp --version
+
+      - name: Probe — extract direct URL (no actual download)
+        run: |
+          set -x
+          yt-dlp --socket-timeout 30 --force-ipv4 -g "${{ inputs.gofile_url }}" || echo "extraction failed"
+
+      - name: Probe — verbose dump (why it succeeds or fails)
+        run: |
+          set -x
+          yt-dlp --socket-timeout 30 --force-ipv4 -v -F "${{ inputs.gofile_url }}" 2>&1 | head -120 || true
