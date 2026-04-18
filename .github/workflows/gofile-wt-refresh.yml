@@ -1,0 +1,87 @@
+name: GoFile X-Website-Token refresh
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # every 3h; token slot is 4h so we have overlap
+  workflow_dispatch:
+
+concurrency:
+  group: gofile-wt-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - name: Install puppeteer
+        run: npm install --silent puppeteer@23
+
+      - name: Intercept X-Website-Token
+        env:
+          PROBE_URL: https://gofile.io/d/cddaf778-9a54-49ae-8d2b-ff993ab169b5
+        run: |
+          cat > probe.cjs <<'JS'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          (async () => {
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
+            const page = await browser.newPage();
+            let wt = null, ua = null, guestToken = null;
+            page.on('request', (req) => {
+              const u = req.url();
+              if (u.includes('api.gofile.io/contents/')) {
+                const h = req.headers();
+                if (h['x-website-token'] && !wt) {
+                  wt = h['x-website-token'];
+                  ua = h['user-agent'] || null;
+                }
+              }
+            });
+            page.on('response', async (r) => {
+              const u = r.url();
+              if (u === 'https://api.gofile.io/accounts' && !guestToken) {
+                try {
+                  const j = await r.json();
+                  if (j && j.data && j.data.token) guestToken = j.data.token;
+                } catch {}
+              }
+            });
+            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+            await page.goto(process.env.PROBE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+            await new Promise(r => setTimeout(r, 3000));
+            await browser.close();
+            if (!wt || !guestToken) { console.error('FATAL: wt or guestToken missing', { wt: !!wt, guestToken: !!guestToken }); process.exit(1); }
+            const record = { wt, ua, guestToken, issuedAt: Date.now() };
+            fs.writeFileSync('/tmp/wt-record.json', JSON.stringify(record));
+            console.log('captured:', { wtLen: wt.length, uaLen: (ua || '').length, guestTokenLen: guestToken.length });
+          })();
+          JS
+          node probe.cjs
+
+      - name: Publish to Cloudflare Worker KV
+        env:
+          PROXY_WORKER_URL: ${{ secrets.PROXY_WORKER_URL }}
+          PROXY_SECRET: ${{ secrets.PROXY_SECRET }}
+        run: |
+          set -e
+          BODY=$(cat /tmp/wt-record.json)
+          TS=$(node -e 'process.stdout.write(Date.now().toString())')
+          BODY_HASH=$(printf '%s' "$BODY" | openssl dgst -sha256 -hex | awk '{print $NF}')
+          MSG="${TS}.POST./wt-store.${BODY_HASH}"
+          SIG=$(printf '%s' "$MSG" | openssl dgst -sha256 -hmac "$PROXY_SECRET" -hex | awk '{print $NF}')
+          echo "POST ${PROXY_WORKER_URL}/wt-store (ts=$TS body=${#BODY}B)"
+          HTTP=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" -X POST "${PROXY_WORKER_URL}/wt-store" \
+            -H "Content-Type: application/json" \
+            -H "X-Proxy-Timestamp: $TS" \
+            -H "X-Proxy-Signature: $SIG" \
+            --data-binary "$BODY")
+          echo "status=$HTTP"
+          cat /tmp/resp.txt; echo
+          [ "$HTTP" = "200" ] || exit 1
