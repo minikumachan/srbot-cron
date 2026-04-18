@@ -1,0 +1,97 @@
+name: Diag — Puppeteer against GoFile
+
+on:
+  workflow_dispatch:
+    inputs:
+      gofile_url:
+        description: "GoFile URL"
+        required: true
+        default: "https://gofile.io/d/cddaf778-9a54-49ae-8d2b-ff993ab169b5"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Runner IP
+        run: curl -s https://api.ipify.org; echo
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install puppeteer
+        run: npm install --silent puppeteer@23
+
+      - name: Probe — render and capture network
+        env:
+          GOFILE_URL: ${{ inputs.gofile_url }}
+        run: |
+          cat > probe.cjs <<'JS'
+          const puppeteer = require('puppeteer');
+          (async () => {
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
+            const page = await browser.newPage();
+
+            const apiResponses = [];
+            page.on('response', async (r) => {
+              const url = r.url();
+              if (url.includes('gofile.io') && (url.includes('/contents') || url.includes('/accounts') || url.includes('/download'))) {
+                let body = '';
+                try { body = (await r.text()).slice(0, 400); } catch {}
+                apiResponses.push({ status: r.status(), url: url.slice(0, 120), body });
+              }
+            });
+
+            const requests = [];
+            page.on('request', (req) => {
+              const url = req.url();
+              if (url.includes('gofile.io') && (url.includes('/contents') || url.includes('/accounts'))) {
+                requests.push({ url: url.slice(0, 120), headers: req.headers() });
+              }
+            });
+
+            try {
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+              await page.goto(process.env.GOFILE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+
+              // Wait a bit more for late XHRs
+              await new Promise(r => setTimeout(r, 3000));
+
+              // Try to read any download links rendered on the page
+              const links = await page.evaluate(() =>
+                [...document.querySelectorAll('a[href]')]
+                  .map(a => a.href)
+                  .filter(h => h.includes('gofile.io') && (h.includes('download') || h.includes('store')))
+                  .slice(0, 5)
+              );
+
+              console.log('=== REQUESTS ===');
+              requests.forEach(r => {
+                console.log(r.url);
+                if (r.headers['x-website-token']) console.log('  X-Website-Token:', r.headers['x-website-token'].slice(0, 20) + '...');
+              });
+
+              console.log('\n=== RESPONSES ===');
+              apiResponses.forEach(r => console.log(`[${r.status}] ${r.url}\n  body: ${r.body}\n`));
+
+              console.log('\n=== LINKS ON PAGE ===');
+              console.log(JSON.stringify(links, null, 2));
+
+              // Get window globals
+              const globals = await page.evaluate(() => ({
+                hasAccountToken: typeof window.localStorage.getItem('accountToken') === 'string',
+                wtFound: Object.keys(window).some(k => k.toLowerCase().includes('token')),
+              }));
+              console.log('\n=== GLOBALS ===');
+              console.log(globals);
+
+            } catch (e) {
+              console.error('probe error:', e.message);
+            }
+            await browser.close();
+          })();
+          JS
+          timeout 120 node probe.cjs || echo "probe finished or timed out"
