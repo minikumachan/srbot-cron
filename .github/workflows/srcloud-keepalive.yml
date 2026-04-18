@@ -18,6 +18,14 @@ jobs:
   keepalive:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CIPHER_KEY: ${{ secrets.CIPHER_KEY }}
+      CRYPTO_SECRET_KEY: ${{ secrets.CRYPTO_SECRET_KEY }}
+      PROXY_WORKER_URL: ${{ secrets.PROXY_WORKER_URL }}
+      PROXY_SECRET: ${{ secrets.PROXY_SECRET }}
+      STRICT_PROXY: ${{ secrets.PROXY_WORKER_URL != '' && '1' || '0' }}
+      NODE_ENV: production
     steps:
       - name: Mint ephemeral App token (10-min lifetime)
         id: app-token
@@ -49,11 +57,3 @@ jobs:
 
       - name: Run SR Cloud keep-alive
         run: npx ts-node -r tsconfig-paths/register scripts/refresh-srcloud-files.ts
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CIPHER_KEY: ${{ secrets.CIPHER_KEY }}
-          CRYPTO_SECRET_KEY: ${{ secrets.CRYPTO_SECRET_KEY }}
-          PROXY_WORKER_URL: ${{ secrets.PROXY_WORKER_URL }}
-          PROXY_SECRET: ${{ secrets.PROXY_SECRET }}
-          STRICT_PROXY: '1'
-          NODE_ENV: production
