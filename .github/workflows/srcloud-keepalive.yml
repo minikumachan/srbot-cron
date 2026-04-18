@@ -1,0 +1,59 @@
+name: SR Cloud GoFile Keep-Alive (GitHub App auth)
+
+# Daily HEAD sweep that resets GoFile's 10-day inactivity timer on
+# every SR Cloud file. Runs independently of Koyeb so file loss is
+# impossible as long as GitHub or Koyeb is alive.
+
+on:
+  schedule:
+    # 03:00 UTC = 12:00 JST, offset from the Koyeb 05:00 JST run.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: srcloud-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mint ephemeral App token (10-min lifetime)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: minikumachan
+          repositories: kaede-chan.kawaii.bot
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: minikumachan/kaede-chan.kawaii.bot
+          token: ${{ steps.app-token.outputs.token }}
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci --include=dev --prefer-offline --no-audit --no-fund
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run SR Cloud keep-alive
+        run: npx ts-node -r tsconfig-paths/register scripts/refresh-srcloud-files.ts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CIPHER_KEY: ${{ secrets.CIPHER_KEY }}
+          CRYPTO_SECRET_KEY: ${{ secrets.CRYPTO_SECRET_KEY }}
+          PROXY_WORKER_URL: ${{ secrets.PROXY_WORKER_URL }}
+          PROXY_SECRET: ${{ secrets.PROXY_SECRET }}
+          STRICT_PROXY: '1'
+          NODE_ENV: production
