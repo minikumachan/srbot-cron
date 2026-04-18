@@ -25,13 +25,13 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: minikumachan
-          repositories: kaede-chan.kawaii.bot
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.PRIVATE_REPO_NAME }}
 
       - name: Checkout private source
         uses: actions/checkout@v4
         with:
-          repository: minikumachan/kaede-chan.kawaii.bot
+          repository: ${{ secrets.PRIVATE_REPO }}
           token: ${{ steps.app-token.outputs.token }}
           ref: main
           persist-credentials: false
