@@ -12,87 +12,64 @@ jobs:
     steps:
       - name: Runner IP
         run: curl -s https://api.ipify.org; echo
-      - name: Probe DL chain (pure HTTP)
+      - name: Probe DL chain (v2 — with X-BL + ?cache=true)
         env:
           FOLDER_ID: ${{ inputs.folder_id }}
         run: |
           set -u
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-          echo "=== [1] POST /accounts (guest token) ==="
-          ACCT_JSON=$(curl -sS -X POST https://api.gofile.io/accounts \
-            -H "User-Agent: $UA" \
-            -H "Origin: https://gofile.io" \
-            -H "Referer: https://gofile.io/")
-          echo "$ACCT_JSON"
-          TOKEN=$(node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>{try{console.log(JSON.parse(b).data.token)}catch(e){console.log('')}})" <<< "$ACCT_JSON")
+          echo "=== [1] POST /accounts ==="
+          ACCT=$(curl -sS -X POST https://api.gofile.io/accounts \
+            -H "User-Agent: $UA" -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/")
+          echo "$ACCT"
+          TOKEN=$(node -e "let b='';process.stdin.on('data',d=>b+=d).on('end',()=>{try{console.log(JSON.parse(b).data.token)}catch(e){}})" <<< "$ACCT")
           echo "TOKEN=$TOKEN"
-          [ -z "$TOKEN" ] && { echo "FATAL: no token"; exit 1; }
 
           echo
-          echo "=== [2] GET /accounts/website (response headers + body) ==="
-          curl -sS -D /tmp/h2.txt -o /tmp/b2.txt https://api.gofile.io/accounts/website \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "User-Agent: $UA" \
-            -H "Origin: https://gofile.io" \
-            -H "Referer: https://gofile.io/"
-          echo "---- response headers ----"
-          cat /tmp/h2.txt
-          echo "---- response body ----"
-          cat /tmp/b2.txt; echo
+          echo "=== [2] compute self X-Website-Token (SHA256, salt=gf2026x) ==="
+          TS=$(( $(date +%s) / 14400 ))
+          RAW="${UA}::en-US::${TOKEN}::${TS}::gf2026x"
+          WT=$(printf '%s' "$RAW" | openssl dgst -sha256 -hex | awk '{print $NF}')
+          echo "TimeSlot=$TS  WT=$WT"
+
+          URL="https://api.gofile.io/contents/$FOLDER_ID?contentFilter=&page=1&pageSize=1000&sortField=name&sortDirection=1"
+          URL_CACHE="${URL}&cache=true"
 
           echo
-          echo "=== [3a] GET /contents/{folder} WITHOUT X-Website-Token ==="
-          curl -sS -o /tmp/c3a.txt -w "status=%{http_code}\n" \
-            "https://api.gofile.io/contents/$FOLDER_ID?contentFilter=&page=1&pageSize=1000&sortField=name&sortDirection=1" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "User-Agent: $UA" \
-            -H "Origin: https://gofile.io" \
-            -H "Referer: https://gofile.io/"
-          head -c 400 /tmp/c3a.txt; echo
+          echo "=== [3A] vanilla — bearer only, no wt, no X-BL, no cache ==="
+          curl -sS -o /tmp/a.txt -w "status=%{http_code}\n" "$URL" \
+            -H "Authorization: Bearer $TOKEN" -H "User-Agent: $UA" \
+            -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/"
+          head -c 200 /tmp/a.txt; echo
 
           echo
-          echo "=== [3b] GET /contents/{folder} WITH X-Website-Token from /accounts/website body ==="
-          WSITE_FROM_BODY=$(node -e "const fs=require('fs');try{const j=JSON.parse(fs.readFileSync('/tmp/b2.txt','utf8'));console.log(j.data&&j.data.token?j.data.token:'')}catch(e){console.log('')}")
-          echo "WSITE_FROM_BODY=$WSITE_FROM_BODY"
-          if [ -n "$WSITE_FROM_BODY" ]; then
-            curl -sS -o /tmp/c3b.txt -w "status=%{http_code}\n" \
-              "https://api.gofile.io/contents/$FOLDER_ID?contentFilter=&page=1&pageSize=1000&sortField=name&sortDirection=1" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "X-Website-Token: $WSITE_FROM_BODY" \
-              -H "User-Agent: $UA" \
-              -H "Origin: https://gofile.io" \
-              -H "Referer: https://gofile.io/"
-            head -c 800 /tmp/c3b.txt; echo
-          fi
+          echo "=== [3B] + X-Website-Token (self) ==="
+          curl -sS -o /tmp/b.txt -w "status=%{http_code}\n" "$URL" \
+            -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: $WT" -H "User-Agent: $UA" \
+            -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/"
+          head -c 200 /tmp/b.txt; echo
 
           echo
-          echo "=== [3c] GET /contents/{folder} WITH self-generated SHA-256 salt=gf2026x ==="
-          TIMESLOT=$(( $(date +%s) / 14400 ))
-          RAW="${UA}::en-US::${TOKEN}::${TIMESLOT}::gf2026x"
-          WSITE_SELF=$(printf '%s' "$RAW" | openssl dgst -sha256 -hex | awk '{print $NF}')
-          echo "WSITE_SELF=$WSITE_SELF"
-          curl -sS -o /tmp/c3c.txt -w "status=%{http_code}\n" \
-            "https://api.gofile.io/contents/$FOLDER_ID?contentFilter=&page=1&pageSize=1000&sortField=name&sortDirection=1" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "X-Website-Token: $WSITE_SELF" \
-            -H "User-Agent: $UA" \
-            -H "Origin: https://gofile.io" \
-            -H "Referer: https://gofile.io/"
-          head -c 400 /tmp/c3c.txt; echo
+          echo "=== [3C] + wt + X-BL: en-US ==="
+          curl -sS -o /tmp/c.txt -w "status=%{http_code}\n" "$URL" \
+            -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: $WT" -H "X-BL: en-US" -H "User-Agent: $UA" \
+            -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/"
+          head -c 200 /tmp/c.txt; echo
 
           echo
-          echo "=== [4] pick one file link from 3b and HEAD it ==="
-          PICK=$(node -e "const fs=require('fs');try{const j=JSON.parse(fs.readFileSync('/tmp/c3b.txt','utf8'));const ch=j.data&&j.data.children||{};for(const k in ch){const c=ch[k];if(c&&c.link){console.log(c.link);break}}}catch(e){}")
+          echo "=== [3D] + wt + X-BL + ?cache=true (spec from report) ==="
+          curl -sS -o /tmp/d.txt -w "status=%{http_code}\n" "$URL_CACHE" \
+            -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: $WT" -H "X-BL: en-US" -H "User-Agent: $UA" \
+            -H "Origin: https://gofile.io" -H "Referer: https://gofile.io/"
+          head -c 600 /tmp/d.txt; echo
+
+          echo
+          echo "=== [4] if 3D OK: pick a link and HEAD it with Cookie ==="
+          PICK=$(node -e "const fs=require('fs');try{const j=JSON.parse(fs.readFileSync('/tmp/d.txt','utf8'));const ch=j.data&&j.data.children||{};for(const k in ch){const c=ch[k];if(c&&c.link){console.log(c.link);break}}}catch(e){}")
           echo "PICK=$PICK"
           if [ -n "$PICK" ]; then
-            echo "--- HEAD (no cookie) ---"
-            curl -sSI -o /tmp/h4a.txt -w "status=%{http_code}\n" "$PICK" \
-              -H "User-Agent: $UA" -H "Referer: https://gofile.io/"
-            head -30 /tmp/h4a.txt
-            echo "--- HEAD (Cookie: accountToken) ---"
-            curl -sSI -o /tmp/h4b.txt -w "status=%{http_code}\n" "$PICK" \
-              -H "User-Agent: $UA" -H "Referer: https://gofile.io/" \
-              -H "Cookie: accountToken=$TOKEN"
-            head -30 /tmp/h4b.txt
+            curl -sSI -o /tmp/h.txt -w "status=%{http_code}\n" "$PICK" \
+              -H "User-Agent: $UA" -H "Referer: https://gofile.io/" -H "Cookie: accountToken=$TOKEN"
+            head -30 /tmp/h.txt
           fi
