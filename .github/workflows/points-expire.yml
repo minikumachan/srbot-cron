@@ -1,0 +1,65 @@
+name: Points Expire (GitHub App auth)
+
+# Runs on GitHub Actions for FREE (public repo = unlimited minutes)
+# but checks out the private source using an ephemeral GitHub App token
+# (10-minute lifetime, auto-renewed per run). The public repo never
+# holds a long-lived PAT.
+#
+# Migrated from the private repo to the public companion on 2026-04-19
+# to stop consuming the 2,000-min/mo quota on the private repo.
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # JST 12:30
+  workflow_dispatch:
+
+concurrency:
+  group: points-expire
+  cancel-in-progress: false
+
+jobs:
+  expire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # POINTS_EXPIRE_* are optional; when unset the script expires points
+      # but skips webhook / Discord channel notification. Set them in
+      # srbot-cron secrets if you want notifications.
+      POINTS_EXPIRE_WEBHOOK: ${{ secrets.POINTS_EXPIRE_WEBHOOK }}
+      POINTS_EXPIRE_MENTION: ${{ secrets.POINTS_EXPIRE_MENTION }}
+      POINTS_EXPIRE_DISCORD_TOKEN: ${{ secrets.POINTS_EXPIRE_DISCORD_TOKEN }}
+      POINTS_EXPIRE_CHANNEL_ID: ${{ secrets.POINTS_EXPIRE_CHANNEL_ID }}
+      POINTS_EXPIRE_LOG_CHANNEL_ID: ${{ secrets.POINTS_EXPIRE_LOG_CHANNEL_ID }}
+      NODE_ENV: production
+    steps:
+      - name: Mint ephemeral App token (10-min lifetime)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ secrets.PRIVATE_REPO_NAME }}
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ steps.app-token.outputs.token }}
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install deps
+        run: npm ci --include=dev --prefer-offline --no-audit --no-fund
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run points expire
+        run: npm run points:expire
